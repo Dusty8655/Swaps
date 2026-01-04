@@ -1,337 +1,232 @@
-# stock-review-bot — Web App + Mobile-ready Frontend
+# Eco-Nest Living — App Specification
 
-This canvas contains a ready-to-push GitHub repo layout (single-file view) for a **web application + lightweight frontend app** built from the prototype. It includes:
+This document is a refined, software-ingestible specification for **Eco-Nest Living**. It is designed to be mapped directly into no-code/low-code builders (Glide, FlutterFlow, Bubble, Adalo) or handed to a developer as a single source of truth.
 
-* a production-ready **backend** (FastAPI) that serves model predictions and training endpoints, plus static files
-* a modern **frontend** (React + Vite) that acts as a chat-like UI to query ticker predictions and show explanations
-* `Dockerfile` + `docker-compose.yml` for easy local deploy
-* `.env.example` with required keys (Plus500 stub + NewsAPI)
-* instructions to run locally, build, and deploy
+## 1) App build target
+- **App type:** PWA (installable on iOS/Android home screen)
+- **Auth:** Email (magic link) or optional guest mode
+- **Region:** UK (v1)
+- **Currency:** GBP
 
-> DISCLAIMER: This project is a research prototype. **Not financial advice.** Backtest thoroughly before any real trading.
+## 2) Data model (platform-neutral)
 
----
+### Entities
+- **User**
+- **Upgrade**
+- **Calculation**
+- **PlanItem**
+- **NewTechnology**
+- **SavedTech**
+- **Assumption**
 
-## Project structure (shown as files below)
+### Relationships
+- User 1—* Calculations
+- User 1—* PlanItems
+- Upgrade 1—* Calculations
+- Upgrade 1—* PlanItems
+- User 1—* SavedTech
+- NewTechnology 1—* SavedTech
 
-```
-stock-review-bot-webapp/
-├─ backend/
-│  ├─ app.py
-│  ├─ requirements.txt
-│  ├─ model_utils.py
-│  └─ Dockerfile
-├─ frontend/
-│  ├─ package.json
-│  ├─ vite.config.js
-│  └─ src/
-│     ├─ main.jsx
-│     └─ App.jsx
-├─ docker-compose.yml
-├─ .env.example
-└─ README.md
-```
+## 3) Screen map (navigation)
 
----
+Bottom tabs:
+1. Home
+2. Calculators
+3. My Plan
+4. New Tech
+5. Profile
 
-## File: `backend/requirements.txt`
+## 4) Calculator logic (platform-neutral formulas)
 
-```
-fastapi
-uvicorn[standard]
-yfinance
-pandas
-numpy
-scikit-learn
-xgboost
-ta
-nltk
-joblib
-requests
-feedparser
-newspaper3k
-python-dotenv
-```
+### Common conversions
+- `price_gbp_per_kwh = electricity_price_p_kwh * 0.01`
 
----
+### LED calculator
 
-## File: `backend/model_utils.py`
+**Inputs:** `qty`, `hours_per_day_band`, `electricity_price_p_kwh`
 
-```python
-# A trimmed-down version of the pipeline: fetch data, build features, load/predict model
-import os
-import joblib
-import pandas as pd
-from dotenv import load_dotenv
-load_dotenv()
-MODEL_DIR = os.getenv('MODEL_DIR', './models')
-MODEL_PATH = os.path.join(MODEL_DIR, 'xgb_best.joblib')
+**Constants:** `old_watts = 60`, `led_watts = 9`
 
-# Provide a small wrapper to load model saved by training script
-def load_model(path=None):
-    if path is None:
-        path = MODEL_PATH
-    if not os.path.exists(path):
-        raise FileNotFoundError('Model artifact not found. Train first.')
-    return joblib.load(path)
+**Band mapping (hours per day):**
+- `1–2 -> 1.5`
+- `3–4 -> 3.5`
+- `5+ -> 5.5`
+- `default -> 3.0`
 
-# stub feature builder: in real repo import from main prototype file
-# here we assume `build_features` exists or is replaced by the full implementation
+**kWh saved/year:**
+- `kwh_saved = qty * (old_watts - led_watts) * hours_per_day * 365 / 1000`
 
-def predict_from_features(model_artifact, features_df):
-    feats = model_artifact['features']
-    scaler = model_artifact['scaler']
-    model = model_artifact['xgb']
-    X = features_df[feats].fillna(0).values
-    Xs = scaler.transform(X)
-    dmat = xgb.DMatrix(Xs)
-    prob = model.predict(dmat)[0]
-    return float(prob)
-```
+**Annual savings (mid):**
+- `annual_mid = kwh_saved * price_gbp_per_kwh`
 
----
+**Range:**
+- `annual_low = annual_mid * 0.9`
+- `annual_high = annual_mid * 1.1`
 
-## File: `backend/app.py`
+**Upfront cost from Upgrade:**
+- `upfront_low = qty * cost_low_gbp`
+- `upfront_high = qty * cost_high_gbp`
+- `upfront_mid = (upfront_low + upfront_high) / 2`
 
-```python
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import os
-from dotenv import load_dotenv
-load_dotenv()
+**Payback months:**
+- `payback_months = upfront_mid / (annual_mid / 12)` (guard `annual_mid > 0`)
 
-from model_utils import load_model
+**10-year savings:**
+- `ten_low = annual_low * 10 - upfront_high`
+- `ten_high = annual_high * 10 - upfront_low`
 
-app = FastAPI(title='Stock Review Bot API')
+### Smart plug calculator
 
-class Query(BaseModel):
-    ticker: str
-    include_news: bool = True
+**Inputs:** `qty`, `standby_watts_band`, `electricity_price_p_kwh`
 
-# Load model once on startup if available
-MODEL_ART = None
-try:
-    MODEL_ART = load_model()
-except Exception:
-    MODEL_ART = None
+**Band mapping (standby watts):**
+- `Low -> 5`
+- `Medium -> 10`
+- `High -> 20`
 
-@app.get('/health')
-def health():
-    return {'status': 'ok', 'model_loaded': MODEL_ART is not None}
+**kWh saved/year:**
+- `kwh_saved = qty * standby_watts * 24 * 365 / 1000`
 
-@app.post('/predict')
-def predict(q: Query):
-    # This endpoint expects the backend to construct features from market data
-    if MODEL_ART is None:
-        raise HTTPException(status_code=500, detail='Model not available. Train or upload model artifact first.')
-    # For brevity this example returns a stubbed response
-    # Replace with actual pipeline call (fetch_market_data, build_features, predict_for_ticker)
-    return {
-        'ticker': q.ticker.upper(),
-        'prediction': {
-            'prob_up': 0.54,
-            'direction': 'UP',
-            'top_feature_importances': [('ma20_above_ma50', 12), ('rsi', 8)],
-            'last_close': 123.45
-        }
-    }
+**Annual savings (mid):**
+- `annual_mid = kwh_saved * price_gbp_per_kwh`
 
-# Static file serving will be configured in Docker / reverse proxy for the built frontend
-```
+**Range (wider variance):**
+- `annual_low = annual_mid * 0.85`
+- `annual_high = annual_mid * 1.15`
 
----
+**Upfront + payback + 10-year:**
+- Same method as LED
 
-## File: `backend/Dockerfile`
+## 5) Premium gating rules
 
-```
-FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]
-```
+- If `user.is_premium = false`:
+  - Show dashboard preview blurred
+  - Show “Unlock whole-home savings” CTA
+  - Allow calculators + basic plan features
+- If `user.is_premium = true`:
+  - Show dashboard totals + export + reminders
 
----
+## 6) Seed categories
 
-## File: `frontend/package.json`
+Suggested seed categories for `Upgrade` / `NewTechnology`:
+- Lighting
+- Smart Plugs
+- Heating & Insulation
+- Appliances
+- Water Efficiency
+- Solar & Storage
+- Tariffs & Monitoring
+
+## 7) Installable JSON spec (single source of truth)
 
 ```json
 {
-  "name": "stock-review-frontend",
-  "version": "0.1.0",
-  "private": true,
-  "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview"
+  "app": {
+    "name": "Eco-Nest Living",
+    "type": "PWA",
+    "auth": {
+      "mode": ["magic_link", "guest"],
+      "primary": "magic_link"
+    },
+    "region": "UK",
+    "currency": "GBP",
+    "navigation": {
+      "bottom_tabs": ["Home", "Calculators", "My Plan", "New Tech", "Profile"]
+    }
   },
-  "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+  "data_model": {
+    "entities": [
+      "User",
+      "Upgrade",
+      "Calculation",
+      "PlanItem",
+      "NewTechnology",
+      "SavedTech",
+      "Assumption"
+    ],
+    "relationships": [
+      { "from": "User", "to": "Calculation", "type": "1_to_many" },
+      { "from": "User", "to": "PlanItem", "type": "1_to_many" },
+      { "from": "Upgrade", "to": "Calculation", "type": "1_to_many" },
+      { "from": "Upgrade", "to": "PlanItem", "type": "1_to_many" },
+      { "from": "User", "to": "SavedTech", "type": "1_to_many" },
+      { "from": "NewTechnology", "to": "SavedTech", "type": "1_to_many" }
+    ]
   },
-  "devDependencies": {
-    "vite": "^5.0.0",
-    "@vitejs/plugin-react": "^4.0.0"
-  }
+  "calculators": {
+    "common": {
+      "price_gbp_per_kwh": "electricity_price_p_kwh * 0.01"
+    },
+    "led": {
+      "inputs": ["qty", "hours_per_day_band", "electricity_price_p_kwh"],
+      "constants": {
+        "old_watts": 60,
+        "led_watts": 9
+      },
+      "band_mapping": {
+        "1-2": 1.5,
+        "3-4": 3.5,
+        "5+": 5.5,
+        "default": 3.0
+      },
+      "formulas": {
+        "kwh_saved": "qty * (old_watts - led_watts) * hours_per_day * 365 / 1000",
+        "annual_mid": "kwh_saved * price_gbp_per_kwh",
+        "annual_low": "annual_mid * 0.9",
+        "annual_high": "annual_mid * 1.1",
+        "upfront_low": "qty * cost_low_gbp",
+        "upfront_high": "qty * cost_high_gbp",
+        "upfront_mid": "(upfront_low + upfront_high) / 2",
+        "payback_months": "upfront_mid / (annual_mid / 12)",
+        "ten_low": "annual_low * 10 - upfront_high",
+        "ten_high": "annual_high * 10 - upfront_low"
+      },
+      "guards": ["annual_mid > 0"]
+    },
+    "smart_plug": {
+      "inputs": ["qty", "standby_watts_band", "electricity_price_p_kwh"],
+      "band_mapping": {
+        "Low": 5,
+        "Medium": 10,
+        "High": 20
+      },
+      "formulas": {
+        "kwh_saved": "qty * standby_watts * 24 * 365 / 1000",
+        "annual_mid": "kwh_saved * price_gbp_per_kwh",
+        "annual_low": "annual_mid * 0.85",
+        "annual_high": "annual_mid * 1.15",
+        "upfront_low": "qty * cost_low_gbp",
+        "upfront_high": "qty * cost_high_gbp",
+        "upfront_mid": "(upfront_low + upfront_high) / 2",
+        "payback_months": "upfront_mid / (annual_mid / 12)",
+        "ten_low": "annual_low * 10 - upfront_high",
+        "ten_high": "annual_high * 10 - upfront_low"
+      },
+      "guards": ["annual_mid > 0"]
+    }
+  },
+  "premium_gating": {
+    "is_premium_false": [
+      "show_dashboard_preview_blurred",
+      "show_unlock_cta",
+      "allow_calculators",
+      "allow_basic_plan_features"
+    ],
+    "is_premium_true": [
+      "show_dashboard_totals",
+      "enable_export",
+      "enable_reminders"
+    ],
+    "cta": "Unlock whole-home savings"
+  },
+  "seed_categories": [
+    "Lighting",
+    "Smart Plugs",
+    "Heating & Insulation",
+    "Appliances",
+    "Water Efficiency",
+    "Solar & Storage",
+    "Tariffs & Monitoring"
+  ]
 }
 ```
-
----
-
-## File: `frontend/vite.config.js`
-
-```js
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
-
-export default defineConfig({
-  plugins: [react()],
-  server: {
-    proxy: {
-      '/api': 'http://localhost:8000'
-    }
-  }
-})
-```
-
----
-
-## File: `frontend/src/main.jsx`
-
-```jsx
-import React from 'react'
-import { createRoot } from 'react-dom/client'
-import App from './App'
-import './index.css'
-
-createRoot(document.getElementById('root')).render(<App />)
-```
-
----
-
-## File: `frontend/src/App.jsx`
-
-```jsx
-import React, { useState } from 'react'
-
-export default function App() {
-  const [ticker, setTicker] = useState('AAPL')
-  const [loading, setLoading] = useState(false)
-  const [result, setResult] = useState(null)
-
-  async function handlePredict() {
-    setLoading(true)
-    setResult(null)
-    try {
-      const resp = await fetch('/api/predict', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ticker })
-      })
-      const data = await resp.json()
-      setResult(data)
-    } catch (e) {
-      setResult({ error: e.message })
-    }
-    setLoading(false)
-  }
-
-  return (
-    <div style={{ maxWidth: 900, margin: '40px auto', fontFamily: 'system-ui, sans-serif' }}>
-      <h1>Stock Review Bot</h1>
-      <p>Query a ticker to get ML-driven prediction informed by news & reviews.</p>
-      <div style={{ display: 'flex', gap: 8 }}>
-        <input value={ticker} onChange={(e) => setTicker(e.target.value)} />
-        <button onClick={handlePredict} disabled={loading}>Predict</button>
-      </div>
-
-      {loading && <p>Loading…</p>}
-
-      {result && (
-        <div style={{ marginTop: 20 }}>
-          <pre>{JSON.stringify(result, null, 2)}</pre>
-        </div>
-      )}
-    </div>
-  )
-}
-```
-
----
-
-## File: `docker-compose.yml`
-
-```yaml
-version: '3.8'
-services:
-  backend:
-    build: ./backend
-    ports:
-      - '8000:8000'
-    environment:
-      - NEWSAPI_KEY
-      - PLUS500_API_KEY
-      - MODEL_DIR=/data/models
-    volumes:
-      - ./backend/models:/data/models
-  frontend:
-    image: node:18
-    working_dir: /app
-    volumes:
-      - ./frontend:/app
-    command: sh -c "npm install && npm run dev -- --host"
-    ports:
-      - '5173:5173'
-```
-
----
-
-## File: `.env.example`
-
-```
-PLUS500_API_KEY=
-NEWSAPI_KEY=
-MODEL_DIR=./backend/models
-```
-
----
-
-## File: `README.md` (quick start)
-
-````md
-# Stock Review Bot — Web App
-
-## Quick start (local)
-
-1. Copy `.env.example` to `.env` and add keys.
-2. Start services with Docker Compose:
-   ```bash
-   docker-compose up --build
-````
-
-3. Open frontend at [http://localhost:5173](http://localhost:5173) and backend at [http://localhost:8000](http://localhost:8000)
-
-## Notes
-
-* Train your model using the CLI training script from the original prototype and save artifact to `backend/models/xgb_best.joblib` before hitting `/predict` for real results.
-* The Plus500 integration is a stub — replace with institutional API calls if you have access.
-
-```
-
----
-
-### What I created for you
-- A ready-to-push repository layout in this document with runnable backend + frontend scaffolding, Docker support, and clear instructions.
-
-### Next steps I can do (pick any, or I can do them all):
-1. **Populate `model_utils.py` with the full feature pipeline** from your prototype so `/predict` runs real predictions. (I'll wire the actual `build_features`, news ingestion, and model loading.)
-2. **Add user authentication** (JWT) and rate-limiting to the API.
-3. **Improve frontend UI** (Tailwind, charts, sentiment timeline, news list, mobile responsiveness).
-4. **Add GitHub Actions** CI that lints, runs unit tests, and builds Docker images.
-5. **Prepare a Play Store / TestFlight-ready mobile wrapper** using Capacitor or React Native (web → native) and generate app manifest files.
-
-Tell me which of the next steps you'd like and I'll extend the project accordingly.
-
-```
-
